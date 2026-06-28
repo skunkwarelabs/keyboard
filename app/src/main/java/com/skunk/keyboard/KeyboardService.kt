@@ -40,6 +40,7 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import kotlin.math.abs
 import kotlin.math.hypot
 
 /**
@@ -421,13 +422,47 @@ class KeyboardService : InputMethodService() {
             background = roundedBg(fill, mix(fill, palette.accent, 0.35f))
             setOnClickListener { onKey(id) }
         }
-        if (id != "⌫") {
+        if (id != "⌫" && id != "space") {
             // Fire the buzz on touch-DOWN, not on click (which only lands on finger
             // lift) — that removes the press-to-vibration lag. Return false so the
             // normal click still happens.
             btn.setOnTouchListener { _, ev ->
                 if (ev.actionMasked == MotionEvent.ACTION_DOWN) haptic()
                 false
+            }
+        }
+        if (id == "space") {
+            // Slide on the space bar to move the cursor (trackpad); a plain tap types
+            // a space. Holding then dragging horizontally steps the caret left/right.
+            var cursorMode = false
+            var startX = 0f
+            var anchorX = 0f
+            btn.setOnTouchListener { v, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        v.isPressed = true; haptic()
+                        startX = ev.x; anchorX = ev.x; cursorMode = false
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (!cursorMode && abs(ev.x - startX) > dp(12)) {
+                            cursorMode = true; anchorX = ev.x
+                        }
+                        if (cursorMode) {
+                            val ic = currentInputConnection
+                            val step = dp(11).toFloat()
+                            while (ev.x - anchorX >= step) { moveCursor(ic, true); anchorX += step }
+                            while (ev.x - anchorX <= -step) { moveCursor(ic, false); anchorX -= step }
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        v.isPressed = false
+                        if (!cursorMode) currentInputConnection?.commitText(" ", 1)  // tap = space
+                        true
+                    }
+                    else -> false
+                }
             }
         }
         if (id == "EMOJI") {
@@ -639,6 +674,12 @@ class KeyboardService : InputMethodService() {
         ic.deleteSurroundingText(if (n > 0) n else 1, 0)
     }
 
+    private fun moveCursor(ic: InputConnection?, right: Boolean) {
+        val code = if (right) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+        ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+        ic?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+    }
+
     private fun handleEnter(ic: InputConnection) {
         if (enterIsAction) {
             ic.performEditorAction(currentInputEditorInfo.imeOptions and EditorInfo.IME_MASK_ACTION)
@@ -792,11 +833,18 @@ class KeyboardService : InputMethodService() {
      */
     private inner class KeyboardLayout(context: android.content.Context) : LinearLayout(context) {
         private val slop = ViewConfiguration.get(context).scaledTouchSlop
+        // A drag only becomes a glide once it has both travelled a bit AND crossed
+        // several distinct letter keys — a tap (even a fast smeared one) never
+        // crosses 3 different keys.
+        private val swipeThreshold = maxOf(dp(40).toFloat(), slop * 4f)
         private val points = ArrayList<PointF>()
         private var centers: Map<Char, PointF> = emptyMap()
         private var swiping = false
         private var downX = 0f
         private var downY = 0f
+        private var lastKey: Char? = null
+        private var distinctKeys = 0
+        private var downOnSpace = false
         private val trailPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
@@ -808,14 +856,25 @@ class KeyboardService : InputMethodService() {
         override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
             if (page != Page.LETTERS) return false
             when (ev.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { downX = ev.x; downY = ev.y; swiping = false }
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.x; downY = ev.y; swiping = false
+                    points.clear(); points.add(PointF(ev.x, ev.y))  // buffer path from the start
+                    if (centers.isEmpty()) centers = computeCenters()
+                    lastKey = nearestLetter(PointF(ev.x, ev.y), centers)
+                    distinctKeys = if (lastKey != null) 1 else 0
+                    downOnSpace = tagAt(ev.x, ev.y) == "space"  // let space own its drag
+                }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!swiping && hypot((ev.x - downX).toDouble(), (ev.y - downY).toDouble()) > slop * 2.5) {
+                    if (swiping) return true
+                    if (downOnSpace) return false  // space-bar cursor trackpad, not a glide
+                    points.add(PointF(ev.x, ev.y))
+                    val k = nearestLetter(PointF(ev.x, ev.y), centers)
+                    if (k != null && k != lastKey) { distinctKeys++; lastKey = k }
+                    val far = hypot((ev.x - downX).toDouble(), (ev.y - downY).toDouble()) > swipeThreshold
+                    // A real glide spells a word across the keys; a tap-smear touches
+                    // at most one neighbour. Require crossing several distinct keys.
+                    if (far && distinctKeys >= SWIPE_MIN_KEYS) {
                         swiping = true
-                        if (centers.isEmpty()) centers = computeCenters()
-                        points.clear()
-                        points.add(PointF(downX, downY))
-                        points.add(PointF(ev.x, ev.y))
                         return true  // hand subsequent events to onTouchEvent
                     }
                 }
@@ -854,6 +913,23 @@ class KeyboardService : InputMethodService() {
             return m
         }
 
+        /** Tag of the key under (x, y), or null. */
+        private fun tagAt(x: Float, y: Float): String? {
+            for (r in 0 until childCount) {
+                val row = getChildAt(r) as? LinearLayout ?: continue
+                if (y < row.y || y > row.y + row.height) continue
+                for (c in 0 until row.childCount) {
+                    val child = row.getChildAt(c)
+                    val left = row.x + child.x
+                    val top = row.y + child.y
+                    if (x in left..left + child.width && y in top..top + child.height) {
+                        return child.tag as? String
+                    }
+                }
+            }
+            return null
+        }
+
         override fun dispatchDraw(canvas: Canvas) {
             super.dispatchDraw(canvas)
             if (swiping && points.size > 1) {
@@ -868,6 +944,7 @@ class KeyboardService : InputMethodService() {
     private companion object {
         const val SAMPLES = 24
         const val VIBE_MS = 55L
+        const val SWIPE_MIN_KEYS = 3  // distinct letter keys a drag must cross to be a glide
         const val EMOJI_COLS = 8   // columns in the (vertical) search-results grid
         const val EMOJI_ROWS = 4   // rows in the (horizontal) main emoji grid
         const val RECENTS_MAX = 32

@@ -1,6 +1,6 @@
 # keyBoard
 
-A custom Android keyboard (IME) by **SkunkWare**. iOS-style layout, Material You
+A custom Android keyboard (IME) by **SkunkWare**. Clean layout, Material You
 theming, glide typing, a full emoji browser — and, of course, the letter **B**
 types as 🅱️.
 
@@ -10,7 +10,7 @@ types as 🅱️.
 
 ## Features
 
-- **iOS-style layout** — inset home row, wide shift/delete, and a
+- **Clean layout** — inset home row, wide shift/delete, and a
   `123` / `#+=` / `ABC` page system with a numbers page and a symbols page.
 - **Material You theming** — colors are pulled live from the system dynamic
   palette (`android.R.color.system_*`) on Android 12+, tracking your wallpaper

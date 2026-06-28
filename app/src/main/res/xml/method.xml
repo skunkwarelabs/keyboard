@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Describes the IME and its subtypes (languages/layouts). -->
+<input-method xmlns:android="http://schemas.android.com/apk/res/android">
+    <subtype
+        android:label="English"
+        android:imeSubtypeLocale="en_US"
+        android:imeSubtypeMode="keyboard" />
+</input-method>

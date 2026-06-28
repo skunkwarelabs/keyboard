@@ -10,6 +10,7 @@ import android.graphics.Path
 import android.graphics.PointF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.InsetDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.StateListDrawable
 import android.inputmethodservice.InputMethodService
@@ -33,6 +34,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.widget.Button
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
@@ -164,7 +166,7 @@ class KeyboardService : InputMethodService() {
     }
 
     private class EmojiItem(val emoji: String, val name: String)
-    private class Cell(val header: String?, val emoji: String?)
+    private class Cell(val emoji: String?, val divider: Boolean = false)
 
     /** Parsed assets/emojis.txt → ordered list of (category, items). */
     private val emojiData: List<Pair<String, List<EmojiItem>>> by lazy {
@@ -196,41 +198,50 @@ class KeyboardService : InputMethodService() {
         }
         root.addView(searchField())
 
-        // Flat emoji list + the start position of each tab section.
+        // Flat emoji list with a divider before each new group; remember tab targets.
         val cells = ArrayList<Cell>()
-        val tabs = ArrayList<Pair<String, Int>>()  // (tab glyph, start position)
+        val tabs = ArrayList<Pair<Int, Int>>()  // (icon resource, scroll position)
 
         val recents = loadRecents()
         if (recents.isNotEmpty()) {
-            tabs.add("🕘" to 0)
-            recents.forEach { cells.add(Cell(null, it)) }
+            tabs.add(R.drawable.ic_cat_recent to 0)
+            recents.forEach { cells.add(Cell(it)) }
         }
-        emojiData.forEach { (_, items) ->
-            tabs.add(items.first().emoji to cells.size)
-            items.forEach { cells.add(Cell(null, it.emoji)) }
+        emojiData.forEach { (name, items) ->
+            if (cells.isNotEmpty()) cells.add(Cell(null, divider = true))  // separate groups
+            tabs.add(catIconRes(name) to cells.size)
+            items.forEach { cells.add(Cell(it.emoji)) }
         }
 
         val recycler = RecyclerView(this).apply {
             layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(40 * EMOJI_ROWS))
             layoutManager = GridLayoutManager(
                 this@KeyboardService, EMOJI_ROWS, GridLayoutManager.HORIZONTAL, false
-            )
+            ).apply {
+                spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                    // A divider takes a full column; emoji take one cell.
+                    override fun getSpanSize(position: Int) =
+                        if (cells[position].divider) EMOJI_ROWS else 1
+                }
+            }
             adapter = EmojiAdapter(cells)
             setHasFixedSize(true)
         }
 
-        // Category tabs — tapping scrolls the grid to that section.
+        // Category tabs — flat icons (not emoji, so they aren't mistaken for selectable
+        // emoji); tapping scrolls the grid to that section.
         val tabRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        tabs.forEach { (glyph, pos) ->
-            tabRow.addView(TextView(this).apply {
-                text = glyph
-                gravity = Gravity.CENTER
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+        tabs.forEach { (iconRes, pos) ->
+            tabRow.addView(ImageView(this).apply {
+                setImageResource(iconRes)
+                setColorFilter(palette.specialText)
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+                setPadding(dp(9), dp(9), dp(9), dp(9))
                 isClickable = true
                 setOnClickListener {
                     (recycler.layoutManager as GridLayoutManager).scrollToPositionWithOffset(pos, 0)
                 }
-            }, LinearLayout.LayoutParams(dp(40), dp(36)))
+            }, LinearLayout.LayoutParams(dp(42), dp(38)))
         }
         root.addView(HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
@@ -240,6 +251,19 @@ class KeyboardService : InputMethodService() {
         root.addView(recycler)
         root.addView(buildRow(listOf(Key("ABC", 2f), Key("space", 5f), Key("⌫", 2f))))
         return root
+    }
+
+    private fun catIconRes(category: String): Int = when {
+        category.startsWith("Smileys") -> R.drawable.ic_emoji
+        category.startsWith("People") -> R.drawable.ic_cat_people
+        category.startsWith("Animals") -> R.drawable.ic_cat_nature
+        category.startsWith("Food") -> R.drawable.ic_cat_food
+        category.startsWith("Travel") -> R.drawable.ic_cat_travel
+        category.startsWith("Activities") -> R.drawable.ic_cat_activities
+        category.startsWith("Objects") -> R.drawable.ic_cat_objects
+        category.startsWith("Symbols") -> R.drawable.ic_cat_symbols
+        category.startsWith("Flags") -> R.drawable.ic_cat_flags
+        else -> R.drawable.ic_cat_objects
     }
 
     private fun emojiPrefs() = getSharedPreferences("emoji", Context.MODE_PRIVATE)
@@ -283,7 +307,7 @@ class KeyboardService : InputMethodService() {
         val results = if (terms.isEmpty()) emptyList()
             else emojiData.asSequence().flatMap { it.second.asSequence() }
                 .filter { item -> terms.all { item.name.contains(it) } }
-                .take(120).map { Cell(null, it.emoji) }.toList()
+                .take(120).map { Cell(it.emoji) }.toList()
         root.addView(RecyclerView(this).apply {
             layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(112))
             layoutManager = GridLayoutManager(this@KeyboardService, EMOJI_COLS)
@@ -319,26 +343,29 @@ class KeyboardService : InputMethodService() {
         RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         override fun getItemCount() = cells.size
-        override fun getItemViewType(position: Int) = if (cells[position].header != null) 0 else 1
+        override fun getItemViewType(position: Int) = if (cells[position].divider) 0 else 1
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
-            val tv = TextView(this@KeyboardService)
             if (viewType == 0) {
-                tv.setTextColor(palette.specialText)
-                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                tv.setTypeface(tv.typeface, Typeface.BOLD)
-                tv.gravity = Gravity.CENTER_VERTICAL
-                tv.setPadding(dp(6), dp(6), 0, dp(2))
-                tv.layoutParams = ViewGroup.LayoutParams(MATCH_PARENT, dp(28))
-            } else {
-                tv.setTextColor(palette.keyText)
-                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
-                tv.gravity = Gravity.CENTER
+                // A thin vertical rule separating one emoji group from the next.
+                val line = GradientDrawable().apply {
+                    setColor(mix(palette.background, palette.specialText, 0.3f))
+                }
+                val v = View(this@KeyboardService).apply {
+                    layoutParams = ViewGroup.LayoutParams(dp(15), dp(40))
+                    background = InsetDrawable(line, dp(7), dp(7), dp(6), dp(7))
+                }
+                return object : RecyclerView.ViewHolder(v) {}
+            }
+            val tv = TextView(this@KeyboardService).apply {
+                setTextColor(palette.keyText)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+                gravity = Gravity.CENTER
                 // Square cell; the grid manager overrides the cross-axis dimension,
                 // so this works for both the horizontal grid and vertical search results.
-                tv.layoutParams = ViewGroup.LayoutParams(dp(40), dp(40))
-                tv.isClickable = true
-                tv.setOnTouchListener { _, ev ->
+                layoutParams = ViewGroup.LayoutParams(dp(40), dp(40))
+                isClickable = true
+                setOnTouchListener { _, ev ->
                     if (ev.actionMasked == MotionEvent.ACTION_DOWN) haptic()
                     false
                 }
@@ -348,14 +375,10 @@ class KeyboardService : InputMethodService() {
 
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             val cell = cells[position]
+            if (cell.divider) return
             val tv = holder.itemView as TextView
-            if (cell.header != null) {
-                tv.text = cell.header.uppercase()
-                tv.setOnClickListener(null)
-            } else {
-                tv.text = cell.emoji
-                tv.setOnClickListener { cell.emoji?.let { commitEmoji(it) } }
-            }
+            tv.text = cell.emoji
+            tv.setOnClickListener { cell.emoji?.let { commitEmoji(it) } }
         }
     }
 

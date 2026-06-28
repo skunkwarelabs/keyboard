@@ -14,3 +14,8 @@ local.properties
 # IDE / OS
 .idea/
 .DS_Store
+
+# Signing secrets — never commit
+keystore.properties
+*.jks
+*.keystore
